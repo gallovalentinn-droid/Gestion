@@ -329,7 +329,8 @@ const CSS = `
 .ds .campo > label{font-size:12px;font-weight:550;color:var(--n700)}
 .ds .campo .ayuda{font-size:11px;color:var(--n500)}
 .ds .campo .error{font-size:11px;color:var(--critico);display:flex;gap:5px;align-items:center}
-.ds input[type=text],.ds select,.ds textarea{font:inherit;font-size:13px;min-height:36px;padding:var(--s2) var(--s3);
+.ds input[type=checkbox]{width:15px;height:15px;min-height:auto;accent-color:var(--n900)}
+.ds input[type=text],.ds input[type=date],.ds select,.ds textarea{font:inherit;font-size:13px;min-height:36px;padding:var(--s2) var(--s3);
   border:1px solid var(--borde2);border-radius:var(--r);background:var(--sup);color:var(--n900);width:100%}
 .ds input[type=text]:hover,.ds select:hover{border-color:var(--n400)}
 .ds textarea{min-height:72px;resize:vertical;line-height:1.5}
@@ -704,6 +705,109 @@ function Buscador({ socios, abrir }) {
    CARGA DE IMPORTE
    ═══════════════════════════════════════════════════════════ */
 
+/* ── Línea de historial editable ──────────────────────────────
+   Secretaría puede corregir o borrar un registro. Todos los demás
+   sólo lo ven. El borrado pide confirmación en el lugar, sin abrir
+   un modal aparte, porque es una corrección puntual y frecuente. */
+
+function LineaLog({ l, esSecretaria, onEditar, onEliminar }) {
+  const [editando, setEditando] = useState(false);
+  const [confirmando, setConfirmando] = useState(false);
+  const [estado, setEstado] = useState(l.estado || "");
+  const [monto, setMonto] = useState(l.monto ? String(l.monto) : "");
+  const [fecha, setFecha] = useState(l.fecha ? l.fecha.slice(0, 10) : "");
+
+  if (editando) {
+    return (
+      <div className="linea-log" style={{ flexWrap: "wrap", gap: "var(--s2)" }}>
+        <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} style={{ width: 140, minHeight: 30 }} />
+        <select value={estado} onChange={(e) => setEstado(e.target.value)} style={{ width: 150, minHeight: 30 }}>
+          {ESTADOS.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
+        </select>
+        <span className="campo-plata" style={{ width: 120 }}>
+          <span className="sig">$</span>
+          <input type="text" inputMode="decimal" value={monto} placeholder="0"
+            onChange={(e) => setMonto(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))} />
+        </span>
+        <button className="btn btn-sm btn-1" onClick={() => {
+          onEditar(l.id, { estado, monto: parseFloat(monto) || null, fecha: new Date(`${fecha}T12:00:00`).toISOString() });
+          setEditando(false);
+        }}>Guardar</button>
+        <button className="btn btn-sm" onClick={() => setEditando(false)}>Cancelar</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="linea-log">
+      <span className="f">{fechaLarga(l.fecha)}</span>
+      <span>
+        {ESTADO_MAP[l.estado]?.label || l.estado}
+        {l.monto > 0 && <span className="num" style={{ color: "var(--exito)", marginLeft: 6 }}>{money(l.monto)}</span>}
+      </span>
+      <span className="t-cap" style={{ marginLeft: "auto" }}>{l.por}</span>
+      {esSecretaria && (
+        confirmando ? (
+          <span style={{ display: "flex", gap: 4 }}>
+            <span className="t-cap" style={{ color: "var(--critico)" }}>¿Eliminar?</span>
+            <button className="btn btn-sm btn-peligro" onClick={() => onEliminar(l.id)}>Sí</button>
+            <button className="btn btn-sm" onClick={() => setConfirmando(false)}>No</button>
+          </span>
+        ) : (
+          <span style={{ display: "flex", gap: 2 }}>
+            <button className="btn btn-sm btn-3 btn-icono" aria-label="Corregir este registro" onClick={() => setEditando(true)}>✎</button>
+            <button className="btn btn-sm btn-3 btn-icono" aria-label="Eliminar este registro" onClick={() => setConfirmando(true)}>✕</button>
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ── Carga de un reclamo o pago anterior al uso de la página ── */
+
+function FormularioLogManual({ onGuardar, onCancelar }) {
+  const [estado, setEstado] = useState("RECLAMADO");
+  const [monto, setMonto] = useState("");
+  const [fecha, setFecha] = useState(() => new Date().toISOString().slice(0, 10));
+  const [actualizarEstado, setActualizarEstado] = useState(false);
+
+  return (
+    <div style={{ background: "var(--sup2)", borderRadius: "var(--r)", padding: "var(--s3)", marginTop: "var(--s2)" }}>
+      <div style={{ display: "flex", gap: "var(--s2)", flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="campo" style={{ flex: "1 1 130px" }}>
+          <label>Fecha</label>
+          <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} />
+        </div>
+        <div className="campo" style={{ flex: "1 1 150px" }}>
+          <label>Qué pasó</label>
+          <select value={estado} onChange={(e) => setEstado(e.target.value)}>
+            {ESTADOS.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
+          </select>
+        </div>
+        <div className="campo" style={{ flex: "0 0 130px" }}>
+          <label>Importe (si aplica)</label>
+          <div className="campo-plata">
+            <span className="sig">$</span>
+            <input type="text" inputMode="decimal" value={monto} placeholder="0"
+              onChange={(e) => setMonto(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))} />
+          </div>
+        </div>
+      </div>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: "var(--s3)", fontSize: 12.5, color: "var(--n700)", cursor: "pointer" }}>
+        <input type="checkbox" checked={actualizarEstado} onChange={(e) => setActualizarEstado(e.target.checked)} style={{ minHeight: "auto", width: "auto" }} />
+        Además, dejar esto como el estado actual de la cuenta
+      </label>
+      <div style={{ display: "flex", gap: "var(--s2)", marginTop: "var(--s3)" }}>
+        <button className="btn btn-1 btn-sm" onClick={() => onGuardar({ estado, monto: parseFloat(monto) || null, fecha, actualizarEstado })}>
+          Agregar al historial
+        </button>
+        <button className="btn btn-sm" onClick={onCancelar}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
 function CargaCobro({ miembros, onGuardar, onCancelar }) {
   const [montos, setMontos] = useState(() => Object.fromEntries(miembros.map((m) => [m.socio, ""])));
   const [tocado, setTocado] = useState({});
@@ -1001,9 +1105,9 @@ function VistaResumen({ filas, totales }) {
           <div className="s">{totales.deuda ? ((totales.cobrado / totales.deuda) * 100).toFixed(1) : 0}% de la deuda</div>
         </div>
         <div className="kpi">
-          <div className="k">Atraso grave</div>
+          <div className="k">Socios con más de 3 meses de deuda</div>
           <div className="v num-xl">{totales.atrasados}</div>
-          <div className="s">socios con más de {MESES_ALERTA} meses</div>
+          <div className="s">de un total de {totales.socios}</div>
         </div>
         <div className="kpi">
           <div className="k">Gestionados</div>
@@ -1050,9 +1154,10 @@ function VistaResumen({ filas, totales }) {
    PANEL DE CUENTA
    ═══════════════════════════════════════════════════════════ */
 
-function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, cerrar }) {
+function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarLog, eliminarLog, agregarLogManual, cerrar }) {
   const [texto, setTexto] = useState("");
   const [cobrando, setCobrando] = useState(false);
+  const [cargandoManual, setCargandoManual] = useState(false);
   const panel = useRef(null);
 
   useEffect(() => {
@@ -1106,7 +1211,7 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, cerrar 
 
           <div style={{ display: "flex", gap: "var(--s2)", marginTop: "var(--s4)", flexWrap: "wrap" }}>
             {est && <Badge tono={ESTADO_MAP[est].tono}>{ESTADO_MAP[est].label}</Badge>}
-            {socio.meses > MESES_ALERTA && <Badge tono="critico">Atraso grave</Badge>}
+            {socio.meses > MESES_ALERTA && <Badge tono="critico">Más de 3 meses de deuda</Badge>}
             {socio.tienePlan && <Badge tono="info">Plan de pagos</Badge>}
             {fechaAccion(estado) && <span className="t-cap">Última acción el {fechaAccion(estado)}</span>}
           </div>
@@ -1173,19 +1278,25 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, cerrar 
         </div>
 
         <div className="panel-sec">
-          <h4>Historial</h4>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "var(--s3)" }}>
+            <h4 style={{ margin: 0 }}>Historial</h4>
+            {esSecretaria && !cargandoManual && (
+              <button className="btn btn-sm btn-3" onClick={() => setCargandoManual(true)}>+ Reclamo o pago anterior</button>
+            )}
+          </div>
+
           {!estado.log?.length ? (
             <p className="t-cap" style={{ margin: 0 }}>Todavía no se registró ninguna acción sobre esta cuenta.</p>
-          ) : estado.log.map((l, i) => (
-            <div className="linea-log" key={i}>
-              <span className="f">{fechaLarga(l.fecha)}</span>
-              <span>
-                {ESTADO_MAP[l.estado]?.label || l.estado}
-                {l.monto > 0 && <span className="num" style={{ color: "var(--exito)", marginLeft: 6 }}>{money(l.monto)}</span>}
-              </span>
-              <span className="t-cap" style={{ marginLeft: "auto" }}>{l.por}</span>
-            </div>
+          ) : estado.log.map((l) => (
+            <LineaLog key={l.id ?? l.fecha} l={l} esSecretaria={esSecretaria} onEditar={editarLog} onEliminar={eliminarLog} />
           ))}
+
+          {cargandoManual && (
+            <FormularioLogManual
+              onCancelar={() => setCargandoManual(false)}
+              onGuardar={(datos) => { agregarLogManual(socio.socio, datos); setCargandoManual(false); }}
+            />
+          )}
         </div>
 
         <div className="panel-sec">
@@ -1219,7 +1330,7 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, cerrar 
 const VISTAS = {
   cola:    { label: "Cola de reclamos", h1: "Cola de reclamos", desc: "Grupos familiares con deuda, ordenados por importe. Un reclamo por familia." },
   socios:  { label: "Socios",           h1: "Socios",           desc: "Todas las cuentas con saldo. Tocá una fila para ver el detalle por período." },
-  resumen: { label: "Resumen",          h1: "Resumen",          desc: "Estado de la cobranza por actividad, para la comisión directiva." },
+  resumen: { label: "Resumen",          h1: "Resumen",          desc: "Pagos y estado de las cuentas corrientes por actividad, para la Comisión Directiva." },
 };
 
 export default function App() {
@@ -1286,12 +1397,13 @@ export default function App() {
     }
     for (const l of logs || []) {
       (g[l.socio] ??= { estado: null, ultimoReclamo: null, pago: 0, saldoAlPagar: 0, log: [], comentarios: [] })
-        .log.push({ fecha: l.fecha, estado: l.estado, por: l.por, monto: l.monto ? Number(l.monto) : undefined });
+        .log.push({ id: l.id, fecha: l.fecha, estado: l.estado, por: l.por, monto: l.monto ? Number(l.monto) : undefined });
     }
     for (const c of coms || []) {
       (g[c.socio] ??= { estado: null, ultimoReclamo: null, pago: 0, saldoAlPagar: 0, log: [], comentarios: [] })
         .comentarios.push({ fecha: c.fecha, por: c.por, texto: c.texto });
     }
+    for (const socio of Object.keys(g)) g[socio].log.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
     setGestion(g);
   }, [avisar]);
 
@@ -1368,6 +1480,46 @@ export default function App() {
     await cargarGestion();
     avisar("Comentario agregado.");
   }, [cargarGestion, avisar, esSecretaria]);
+
+  /* ── Edición del historial ──────────────────────────────────
+     Para corregir un reclamo mal cargado o sumar reclamos/pagos de
+     antes de usar la página. Sólo secretaría; queda igual para todos
+     apenas se guarda, porque el historial vive en la base, no en cada
+     navegador. */
+
+  const editarLog = useCallback(async (id, cambios) => {
+    const { error } = await supabase.from("gestion_log").update(cambios).eq("id", id);
+    if (error) { avisar("No se pudo guardar la corrección.", { tono: "error" }); return; }
+    await cargarGestion();
+    avisar("Registro corregido.");
+  }, [cargarGestion, avisar]);
+
+  const eliminarLog = useCallback(async (id) => {
+    const { error } = await supabase.from("gestion_log").delete().eq("id", id);
+    if (error) { avisar("No se pudo eliminar el registro.", { tono: "error" }); return; }
+    await cargarGestion();
+    avisar("Registro eliminado del historial.");
+  }, [cargarGestion, avisar]);
+
+  const agregarLogManual = useCallback(async (socio, { estado, monto, fecha, actualizarEstado }) => {
+    const quien = esSecretaria ? "Secretaría" : "Comisión";
+    const fechaIso = new Date(`${fecha}T12:00:00`).toISOString();
+    const { error: eLog } = await supabase.from("gestion_log")
+      .insert({ socio, fecha: fechaIso, estado, por: `${quien} (carga manual)`, monto: monto || null });
+    if (eLog) { avisar("No se pudo agregar el registro.", { tono: "error" }); return; }
+
+    if (actualizarEstado) {
+      const prev = g(socio);
+      const { error: eG } = await supabase.from("gestion").upsert({
+        socio, estado, ultimo_reclamo: estado === "RECLAMADO" ? fechaIso : prev.ultimoReclamo,
+        pago: monto ? (Number(prev.pago) || 0) + monto : prev.pago,
+        saldo_al_pagar: prev.saldoAlPagar, actualizado_en: fechaIso, actualizado_por: `${quien} (carga manual)`,
+      });
+      if (eG) { avisar("El registro se agregó, pero no pude actualizar el estado actual de la cuenta.", { tono: "error" }); }
+    }
+    await cargarGestion();
+    avisar("Se agregó el registro al historial.");
+  }, [g, cargarGestion, avisar, esSecretaria]);
 
   /* ── Importaciones ── */
   // Trae los saldos que subió cualquiera (vos u otra persona) desde Supabase.
@@ -1519,7 +1671,7 @@ export default function App() {
         <div className="lienzo">
           <div className="inicio">
             <img className="agua" src={ESCUDO} alt="Escudo del club" />
-            <h2 className="t-display">Gestión de morosos</h2>
+            <h2 className="t-display">Saldos de cuentas corrientes</h2>
             <p>Los saldos entran tal cual salen del sistema del club. La gestión que cargues encima se guarda aparte, así no se pierde cuando volvés a importar.</p>
             <BotonArchivo onFile={importarSaldos} variante="btn-1" cargando={procesando === "saldos"}>
               <Svg d={Ico.sube} /> Subir archivo de saldos
@@ -1558,7 +1710,7 @@ export default function App() {
           <div className="marca">
             <img className="escudo" src={ESCUDO} alt="Escudo del club" />
             <span className="sep" aria-hidden="true" />
-            <span className="titulo">Morosos</span>
+            <span className="titulo">Saldos de cuentas corrientes</span>
           </div>
 
           <Buscador socios={datos.socios} abrir={setAbierto} />
@@ -1582,7 +1734,7 @@ export default function App() {
                 Exportar cobranzas
               </button>
               {esSecretaria && <button role="menuitem" onClick={() => setConfirmar("cobranzas")}>Importar cobranzas…</button>}
-              <button role="menuitem" onClick={() => setConfirmar("saldos")}>Actualizar saldos…</button>
+              <button role="menuitem" onClick={() => setConfirmar("saldos")}>Cargar saldos de otro mes…</button>
               {esSecretaria && (<><hr />
                 <button role="menuitem" className="peligro" disabled={!Object.keys(gestion).length} onClick={() => setConfirmar("borrar")}>
                   Borrar toda la gestión…
@@ -1642,7 +1794,7 @@ export default function App() {
               <div className="v num-xl" style={{ color: totales.cobrado ? "var(--exito)" : undefined }}>{money(totales.cobrado)}</div>
             </div>
             <div className="dato oculta-sm">
-              <div className="k">Atraso grave</div>
+              <div className="k">+3 meses de deuda</div>
               <div className="v num-xl">{totales.atrasados}</div>
             </div>
           </div>
@@ -1664,7 +1816,8 @@ export default function App() {
       {socioAbierto && (
         <Panel socio={socioAbierto} familia={datos.familias.find((f) => f.jefefam === socioAbierto.jefefam)}
           estado={g(socioAbierto.socio)} esSecretaria={esSecretaria}
-          marcar={marcar} comentar={comentar} cerrar={() => setAbierto(null)} />
+          marcar={marcar} comentar={comentar} editarLog={editarLog} eliminarLog={eliminarLog}
+          agregarLogManual={agregarLogManual} cerrar={() => setAbierto(null)} />
       )}
 
       {confirmar === "borrar" && (
@@ -1693,14 +1846,15 @@ export default function App() {
       )}
 
       {confirmar === "saldos" && (
-        <Modal titulo="Actualizar los saldos" onCerrar={() => setConfirmar(null)}
+        <Modal titulo="Cargar los saldos de otro mes" onCerrar={() => setConfirmar(null)}
           acciones={<>
             <button className="btn" onClick={() => setConfirmar(null)}>Cancelar</button>
             <BotonArchivo variante="btn-1" cargando={procesando === "saldos"}
-              onFile={(f) => { setConfirmar(null); importarSaldos(f); }}>Elegir archivo</BotonArchivo>
+              onFile={(f) => { setConfirmar(null); importarSaldos(f); }}>Elegir archivo de septiembre (o el que corresponda)</BotonArchivo>
           </>}>
-          Se reemplazan todos los saldos por los del archivo nuevo. Los estados, pagos y comentarios que cargaste
-          se conservan: se vuelven a cruzar por número de socio.
+          Se reemplazan los saldos por los del archivo nuevo — es lo mismo que hacer un corte de mes.
+          Los reclamos, pagos y comentarios que ya cargaste no se tocan: quedan guardados por número de
+          socio y se vuelven a cruzar solos con el saldo actualizado de cada uno.
         </Modal>
       )}
 
