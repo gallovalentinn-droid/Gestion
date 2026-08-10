@@ -1288,7 +1288,7 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
           {!estado.log?.length ? (
             <p className="t-cap" style={{ margin: 0 }}>Todavía no se registró ninguna acción sobre esta cuenta.</p>
           ) : estado.log.map((l) => (
-            <LineaLog key={l.id ?? l.fecha} l={l} esSecretaria={esSecretaria} onEditar={editarLog} onEliminar={eliminarLog} />
+            <LineaLog key={l.id ?? l.fecha} l={l} esSecretaria={esSecretaria} onEditar={editarLog} onEliminar={(id) => eliminarLog(id, socio.socio)} />
           ))}
 
           {cargandoManual && (
@@ -1494,11 +1494,20 @@ export default function App() {
     avisar("Registro corregido.");
   }, [cargarGestion, avisar]);
 
-  const eliminarLog = useCallback(async (id) => {
+  const eliminarLog = useCallback(async (id, socio) => {
     const { error } = await supabase.from("gestion_log").delete().eq("id", id);
     if (error) { avisar("No se pudo eliminar el registro.", { tono: "error" }); return; }
+
+    // Si no queda ningún registro para este socio, ya no tiene sentido que
+    // siga marcado como "Reclamado" (ni con ningún otro estado): se limpia.
+    const { count, error: eCount } = await supabase
+      .from("gestion_log").select("id", { count: "exact", head: true }).eq("socio", socio);
+    if (!eCount && !count) {
+      await supabase.from("gestion").delete().eq("socio", socio);
+    }
+
     await cargarGestion();
-    avisar("Registro eliminado del historial.");
+    avisar(!eCount && !count ? "Se eliminó el último registro: el socio volvió a quedar sin gestionar." : "Registro eliminado del historial.");
   }, [cargarGestion, avisar]);
 
   const agregarLogManual = useCallback(async (socio, { estado, monto, fecha, actualizarEstado }) => {
