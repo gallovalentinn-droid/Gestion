@@ -588,15 +588,12 @@ function hallarCol(cab, candidatas) {
   return cab.find((c) => candidatas.some((k) => norm(c).includes(norm(k))));
 }
 
-function leerCobranzas(filas) {
+function leerCobranzasTabla(filas) {
   if (!filas.length) return { error: "El archivo no tiene ninguna fila de datos." };
   const cab = Object.keys(filas[0]);
   const colSocio = hallarCol(cab, ["SOCIO", "NROSOCIO", "NUMEROSOCIO", "LEGAJO"]);
   const colImporte = hallarCol(cab, ["COBRADO", "IMPORTE", "MONTO", "PAGO", "ABONADO", "TOTAL"]);
-  if (!colSocio || !colImporte) {
-    const falta = !colSocio && !colImporte ? "la del socio y la del importe" : !colSocio ? "la del número de socio" : "la del importe";
-    return { error: `Falta ${falta}. El archivo trae estas columnas: ${cab.join(", ")}. Renombrá la columna correspondiente a SOCIO o IMPORTE y volvé a subirlo.` };
-  }
+  if (!colSocio || !colImporte) return { error: null }; // no es este formato, se prueba el otro lector
   const pagos = new Map();
   for (const f of filas) {
     const socio = Number(String(f[colSocio]).replace(/\D/g, ""));
@@ -605,8 +602,76 @@ function leerCobranzas(filas) {
     if (!socio || !importe || importe <= 0) continue;
     pagos.set(socio, (pagos.get(socio) || 0) + importe);
   }
-  if (!pagos.size) return { error: `Encontré las columnas "${colSocio}" e "${colImporte}" pero ninguna fila con un importe válido mayor a cero.` };
+  if (!pagos.size) return { error: null };
   return { pagos, colSocio, colImporte };
+}
+
+// Lee el "Listado de Cobranzas (Detallado)" tal como lo imprime el sistema del
+// club: un bloque por socio, uno o más recibos dentro de cada bloque, varios
+// conceptos por recibo, y un total al cierre de cada recibo. Ignora los
+// recibos marcados **Anulado**, igual que hace el propio reporte en su pie.
+function leerCobranzasListadoClub(filas2D) {
+  const esTexto = (v) => typeof v === "string";
+  const esNum = (v) => typeof v === "number" && !Number.isNaN(v);
+  const eq = (row, t) => row.some((v) => esTexto(v) && v.trim() === t);
+  const incluye = (row, t) => row.some((v) => esTexto(v) && v.includes(t));
+
+  const esEsteFormato = filas2D.slice(0, 15).some((r) => incluye(r, "Listado de Cobranzas")) || filas2D.some((r) => eq(r, "Socio:"));
+  if (!esEsteFormato) return { error: null };
+
+  const pagos = new Map();
+  const nombres = new Map();
+  let socioActual = null, nombreActual = "";
+  let i = 0;
+  while (i < filas2D.length) {
+    const row = filas2D[i];
+    if (eq(row, "Socio:")) {
+      const nxt = filas2D[i + 1] || [];
+      const num = nxt.find(esNum);
+      const nom = nxt.find((v) => esTexto(v) && v.trim());
+      socioActual = num ? Math.round(num) : null;
+      nombreActual = nom || "";
+      i += 2; continue;
+    }
+    if (incluye(row, "Fecha") && row.some(esNum)) {
+      let anulado = incluye(row, "Anulado");
+      let j = i + 1;
+      while (j < filas2D.length && !eq(filas2D[j], "Total:")) {
+        if (incluye(filas2D[j], "Anulado")) anulado = true;
+        j++;
+      }
+      if (j < filas2D.length) {
+        const nums = filas2D[j].filter(esNum);
+        const monto = nums.length ? nums[nums.length - 1] : 0;
+        if (!anulado && socioActual && monto > 0) {
+          pagos.set(socioActual, (pagos.get(socioActual) || 0) + monto);
+          nombres.set(socioActual, nombreActual);
+        }
+      }
+      i = j + 1; continue;
+    }
+    i++;
+  }
+
+  if (!pagos.size) return { error: "Encontré el formato del listado de cobranzas, pero no pude leer ningún importe. Puede que el diseño del reporte haya cambiado." };
+  return { pagos, nombres, formato: "listado del club" };
+}
+
+// Prueba primero el lector de tabla simple (una columna SOCIO y otra IMPORTE);
+// si el archivo no tiene esa forma, prueba el listado detallado del sistema
+// del club. Si ninguno reconoce el archivo, explica qué hace falta.
+function leerCobranzas(filasTabla, filas2D) {
+  const t = leerCobranzasTabla(filasTabla);
+  if (t.pagos) return t;
+  const c = leerCobranzasListadoClub(filas2D);
+  if (c.pagos) return c;
+  if (c.error) return c;
+  const cab = filasTabla.length ? Object.keys(filasTabla[0]) : [];
+  return {
+    error: `No reconocí el formato de este archivo. Sirve una planilla con una columna de socio y otra de importe` +
+      (cab.length ? ` (este archivo trae: ${cab.join(", ")})` : "") +
+      `, o el "Listado de Cobranzas (Detallado)" tal como lo exporta el sistema del club.`,
+  };
 }
 
 function exportarCobranzas(datos, gestion) {
@@ -1571,14 +1636,17 @@ export default function App() {
     const quien = esSecretaria ? "Secretaría" : "Comisión";
     try {
       const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
-      const { pagos, error } = leerCobranzas(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      const hoja = wb.Sheets[wb.SheetNames[0]];
+      const filasTabla = XLSX.utils.sheet_to_json(hoja);
+      const filas2D = XLSX.utils.sheet_to_json(hoja, { header: 1, raw: true, defval: "" });
+      const { pagos, nombres, formato, error } = leerCobranzas(filasTabla, filas2D);
       if (error) { avisar(error, { tono: "error", persistente: true }); setProcesando(""); return; }
 
       const ahora = new Date().toISOString();
       let aplicados = 0, totales = 0, parciales = 0; const sinMatch = [];
       for (const [nro, importe] of pagos) {
         const soc = datos.socios.find((x) => x.socio === nro);
-        if (!soc) { sinMatch.push(nro); continue; }
+        if (!soc) { sinMatch.push(nombres?.get(nro) ? `${nro} (${nombres.get(nro).trim()})` : String(nro)); continue; }
         const prev = g(nro);
         const acum = (Number(prev.pago) || 0) + importe;
         const estado = acum >= soc.deuda ? "PAGO" : "PAGO PARCIAL";
@@ -1587,11 +1655,11 @@ export default function App() {
         await supabase.from("gestion_log").insert({ socio: nro, fecha: ahora, estado, por: "Importación de cobranzas", monto: importe });
       }
       await cargarGestion();
-      avisar(`${aplicados} cobranzas aplicadas: ${totales} cancelaron la deuda, ${parciales} quedaron parciales.` +
+      avisar(`${aplicados} cobranzas aplicadas${formato ? ` desde el ${formato}` : ""}: ${totales} cancelaron la deuda, ${parciales} quedaron parciales.` +
         (sinMatch.length ? ` ${sinMatch.length} socio(s) no estaban en los saldos.` : ""));
       if (sinMatch.length) avisar(`No encontré estos socios en los saldos cargados: ${sinMatch.slice(0, 10).join(", ")}${sinMatch.length > 10 ? "…" : ""}. Revisá los números o volvé a importar los saldos.`, { tono: "error", persistente: true });
-    } catch {
-      avisar("No pude leer ese archivo. Tiene que ser un .xls o .xlsx con una fila por cobranza.", { tono: "error" });
+    } catch (err) {
+      avisar("No pude leer ese archivo. Tiene que ser un .xls o .xlsx con una fila por cobranza, o el listado detallado que exporta el sistema del club.", { tono: "error" });
     }
     setProcesando("");
   }
@@ -1874,8 +1942,10 @@ export default function App() {
             <BotonArchivo variante="btn-1" cargando={procesando === "cobranzas"}
               onFile={(f) => { setConfirmar(null); importarCobranzas(f); }}>Elegir archivo</BotonArchivo>
           </>}>
-          El archivo necesita una columna con el número de socio y otra con el importe. Cada cobranza se marca como
-          «Pagó» o «Pago parcial» según el saldo del socio. Si te equivocás de archivo, podés deshacerlo.
+          Sirven dos formatos: una planilla con una columna de socio y otra de importe, o el <strong>"Listado
+          de Cobranzas (Detallado)"</strong> tal como lo exporta el sistema del club — ese lo reconoce solo, respeta
+          los recibos anulados y no los cuenta como cobrados. Cada cobranza se marca como «Pagó» o «Pago parcial»
+          según el saldo del socio. Si te equivocás de archivo, podés deshacerlo.
         </Modal>
       )}
 
