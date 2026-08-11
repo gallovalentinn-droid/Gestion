@@ -526,6 +526,34 @@ function Vacio({ icono, titulo, texto, acciones }) {
    DATOS
    ═══════════════════════════════════════════════════════════ */
 
+// Aplica lo cobrado (registrado en la gestión) contra la deuda importada del
+// socio, período por período, empezando por el más viejo — es el criterio
+// contable habitual: lo que se cobra cancela primero la deuda más antigua.
+// Devuelve lo que realmente queda pendiente, ya con el pago descontado.
+function calcularNeto(socio, pago) {
+  const sumaPorPeriodo = new Map();
+  for (const d of socio.detalle) {
+    if (d.deuda > 0) sumaPorPeriodo.set(d.periodo, (sumaPorPeriodo.get(d.periodo) || 0) + d.deuda);
+  }
+  const ordenado = [...sumaPorPeriodo.entries()].sort((a, b) => a[0] - b[0]); // más viejo primero
+
+  let restante = Number(pago) || 0;
+  let deudaNeta = 0, vieja = 0, corriente = 0, mesesNeto = 0;
+  const porPeriodo = [];
+  for (const [periodo, monto] of ordenado) {
+    const cubierto = Math.min(restante, monto);
+    restante -= cubierto;
+    const saldo = Math.round((monto - cubierto) * 100) / 100;
+    porPeriodo.push({ periodo, bruto: monto, cubierto, neto: saldo });
+    if (saldo > 0.5) {
+      mesesNeto++;
+      deudaNeta += saldo;
+      if (periodo >= CORTE_ANIO_ACTUAL) corriente += saldo; else vieja += saldo;
+    }
+  }
+  return { deudaNeta, mesesNeto, vieja, corriente, porPeriodo };
+}
+
 function construirDatos(filas) {
   const porSocio = new Map();
   for (const f of filas) {
@@ -677,10 +705,12 @@ function leerCobranzas(filasTabla, filas2D) {
 function exportarCobranzas(datos, gestion) {
   const fila = (s) => {
     const e = gestion[s.socio] || {};
+    const neto = calcularNeto(s, e.pago);
     return {
       SOCIO: s.socio, NOMBRE: s.nombre, ACTIVIDAD: s.actividad, DIVISION: s.division,
-      MESES_ADEUDADOS: s.meses, DEUDA: s.deuda, ESTADO: e.estado || "",
-      FECHA_ACCION: fechaAccion(e), ULTIMO_RECLAMO: fechaLarga(e.ultimoReclamo), COBRADO: Number(e.pago) || 0,
+      DEUDA_ORIGINAL: s.deuda, COBRADO: Number(e.pago) || 0, SALDO_PENDIENTE: neto.deudaNeta,
+      MESES_ADEUDADOS_ORIGINAL: s.meses, MESES_PENDIENTES: neto.mesesNeto,
+      ESTADO: e.estado || "", FECHA_ACCION: fechaAccion(e), ULTIMO_RECLAMO: fechaLarga(e.ultimoReclamo),
     };
   };
   const cobranzas = datos.socios.filter((s) => Number((gestion[s.socio] || {}).pago) > 0).map(fila);
@@ -696,7 +726,7 @@ function exportarCobranzas(datos, gestion) {
    BUSCADOR GLOBAL
    ═══════════════════════════════════════════════════════════ */
 
-function Buscador({ socios, abrir }) {
+function Buscador({ socios, g, abrir }) {
   const [q, setQ] = useState("");
   const [foco, setFoco] = useState(0);
   const input = useRef(null);
@@ -715,8 +745,9 @@ function Buscador({ socios, abrir }) {
     const palabras = t.split(/\s+/);
     return socios
       .filter((s) => palabras.every((p) => s.nombre.toLowerCase().includes(p) || String(s.socio).startsWith(p)))
-      .sort((a, b) => b.deuda - a.deuda).slice(0, 12);
-  }, [q, socios]);
+      .map((s) => ({ ...s, deudaNeta: calcularNeto(s, g(s.socio).pago).deudaNeta }))
+      .sort((a, b) => b.deudaNeta - a.deudaNeta).slice(0, 12);
+  }, [q, socios, g]);
 
   const elegir = (socio) => { abrir(socio); setQ(""); setFoco(0); input.current?.blur(); };
 
@@ -757,7 +788,7 @@ function Buscador({ socios, abrir }) {
                 <span className="r-nom">{s.nombre}</span>
                 <span className="r-meta">Socio {s.socio} · {s.actividad}</span>
               </span>
-              <span className="r-imp num">{money(s.deuda)}</span>
+              <span className="r-imp num">{money(s.deudaNeta)}</span>
             </button>
           ))}
         </div>
@@ -960,7 +991,7 @@ function FilaFamilia({ fam, actividad, marcar, g, abrir }) {
                     <button className="h-nom" onClick={() => abrir(m.socio)}>{m.nombre}</button>
                     <span className="t-cap">{m.actividad} · {m.division}</span>
                     {est && <Badge tono={ESTADO_MAP[est].tono}>{ESTADO_MAP[est].label}</Badge>}
-                    <span className="h-imp num apagado">{money(m.deuda)}</span>
+                    <span className="h-imp num apagado">{money(m.deudaNeta)}</span>
                   </div>
                 );
               })}
@@ -977,13 +1008,17 @@ function FilaFamilia({ fam, actividad, marcar, g, abrir }) {
       </div>
 
       {cobrando ? (
-        <CargaCobro miembros={fam.miembros} onCancelar={() => setCobrando(false)}
+        <CargaCobro miembros={fam.miembros.map((m) => ({ ...m, deuda: m.deudaNeta, meses: m.mesesNeto }))} onCancelar={() => setCobrando(false)}
           onGuardar={(montos) => {
             setCobrando(false);
             const conPago = fam.miembros.filter((m) => montos[m.socio] > 0).map((m) => m.socio);
             marcar(conPago, null, (s) => {
               const m = fam.miembros.find((x) => x.socio === s);
-              return { pago: montos[s], saldoAlPagar: m ? m.deuda : 0, estadoAuto: montos[s] >= (m?.deuda || 0) ? "PAGO" : "PAGO PARCIAL" };
+              const pagoPrevio = g(s).pago || 0;
+              return {
+                pago: pagoPrevio + montos[s], saldoAlPagar: m ? m.deuda : 0,
+                estadoAuto: montos[s] >= (m?.deudaNeta || 0) ? "PAGO" : "PAGO PARCIAL",
+              };
             });
           }} />
       ) : (
@@ -1035,9 +1070,9 @@ const COLUMNAS = [
   { id: "socio",  label: "Socio",       ancho: 78,  orden: (a, b) => a.socio - b.socio, clase: "oculta-sm" },
   { id: "nombre", label: "Nombre",      orden: (a, b) => a.nombre.localeCompare(b.nombre) },
   { id: "estado", label: "Estado" },
-  { id: "meses",  label: "Meses",       orden: (a, b) => a.meses - b.meses, centro: true },
+  { id: "meses",  label: "Meses",       orden: (a, b) => a.mesesNeto - b.mesesNeto, centro: true },
   { id: "fecha",  label: "Últ. acción", clase: "oculta-md" },
-  { id: "deuda",  label: "Deuda",       orden: (a, b) => a.deuda - b.deuda, num: true },
+  { id: "deuda",  label: "Saldo",       orden: (a, b) => a.deudaNeta - b.deudaNeta, num: true },
 ];
 
 function VistaSocios({ lista, g, abrir, busqueda, setBusqueda, filtroEstado, setFiltroEstado, limpiarTodo }) {
@@ -1114,15 +1149,15 @@ function VistaSocios({ lista, g, abrir, busqueda, setBusqueda, filtroEstado, set
                     </td>
                     <td>{est ? <Badge tono={ESTADO_MAP[est].tono}>{ESTADO_MAP[est].label}</Badge> : <Badge tono="vacio">Sin gestionar</Badge>}</td>
                     <td style={{ textAlign: "center" }}>
-                      {s.meses > MESES_ALERTA
-                        ? <Badge tono="critico" title={`Adeuda ${s.meses} períodos`}>{s.meses}</Badge>
-                        : <span className="num apagado">{s.meses}</span>}
+                      {s.mesesNeto > MESES_ALERTA
+                        ? <Badge tono="critico" title={`Adeuda ${s.mesesNeto} períodos`}>{s.mesesNeto}</Badge>
+                        : <span className="num apagado">{s.mesesNeto}</span>}
                     </td>
                     <td className="oculta-md num" style={{ fontSize: 12 }}>
                       {fechaAccion(e) ? <span>{fechaAccion(e)}</span> : <span className="vacio-celda">—</span>}
                     </td>
                     <td className="celda-num">
-                      <div style={{ fontWeight: 600 }}>{money(s.deuda)}</div>
+                      <div style={{ fontWeight: 600 }}>{money(s.deudaNeta)}</div>
                       {e.pago > 0 && <div className="t-cap" style={{ color: "var(--exito)" }}>{money(e.pago)} cobrado</div>}
                     </td>
                   </tr>
@@ -1167,7 +1202,7 @@ function VistaResumen({ filas, totales }) {
         <div className="kpi">
           <div className="k">Cobrado</div>
           <div className="v num-xl" style={{ color: totales.cobrado ? "var(--exito)" : undefined }}>{money(totales.cobrado)}</div>
-          <div className="s">{totales.deuda ? ((totales.cobrado / totales.deuda) * 100).toFixed(1) : 0}% de la deuda</div>
+          <div className="s">{totales.deudaBruta ? ((totales.cobrado / totales.deudaBruta) * 100).toFixed(1) : 0}% de lo facturado</div>
         </div>
         <div className="kpi">
           <div className="k">Socios con más de 3 meses de deuda</div>
@@ -1232,14 +1267,19 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
     return () => document.removeEventListener("keydown", esc);
   }, [cerrar]);
 
+  const neto = useMemo(() => calcularNeto(socio, estado.pago), [socio, estado.pago]);
+
   const porPeriodo = useMemo(() => {
+    const netoPorPeriodo = new Map(neto.porPeriodo.map((p) => [p.periodo, p]));
     const m = new Map();
     for (const d of socio.detalle) {
       if (!m.has(d.periodo)) m.set(d.periodo, []);
       m.get(d.periodo).push(d);
     }
-    return [...m.entries()].sort((a, b) => b[0] - a[0]);
-  }, [socio]);
+    return [...m.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([periodo, items]) => [periodo, items, netoPorPeriodo.get(periodo)]);
+  }, [socio, neto]);
 
   const est = estado.estado;
 
@@ -1259,12 +1299,13 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
 
           <div className="resumen-socio" style={{ marginTop: "var(--s5)" }}>
             <div>
-              <div className="t-cap">Deuda</div>
-              <div className="num-xl">{money(socio.deuda)}</div>
+              <div className="t-cap">Deuda pendiente</div>
+              <div className="num-xl">{money(neto.deudaNeta)}</div>
+              {estado.pago > 0 && <div className="t-cap" style={{ marginTop: 2 }}>de {money(socio.deuda)} originales</div>}
             </div>
             <div>
               <div className="t-cap">Períodos impagos</div>
-              <div className="num-xl">{socio.meses}</div>
+              <div className="num-xl">{neto.mesesNeto}</div>
             </div>
             {estado.pago > 0 && (
               <div>
@@ -1276,7 +1317,7 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
 
           <div style={{ display: "flex", gap: "var(--s2)", marginTop: "var(--s4)", flexWrap: "wrap" }}>
             {est && <Badge tono={ESTADO_MAP[est].tono}>{ESTADO_MAP[est].label}</Badge>}
-            {socio.meses > MESES_ALERTA && <Badge tono="critico">Más de 3 meses de deuda</Badge>}
+            {neto.mesesNeto > MESES_ALERTA && <Badge tono="critico">Más de 3 meses de deuda</Badge>}
             {socio.tienePlan && <Badge tono="info">Plan de pagos</Badge>}
             {fechaAccion(estado) && <span className="t-cap">Última acción el {fechaAccion(estado)}</span>}
           </div>
@@ -1293,12 +1334,13 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
         </div>
 
         {esSecretaria && (cobrando ? (
-          <CargaCobro miembros={[socio]} onCancelar={() => setCobrando(false)}
+          <CargaCobro miembros={[{ ...socio, deuda: neto.deudaNeta, meses: neto.mesesNeto }]} onCancelar={() => setCobrando(false)}
             onGuardar={(m) => {
               setCobrando(false);
+              const pagoPrevio = estado.pago || 0;
               marcar([socio.socio], null, () => ({
-                pago: m[socio.socio], saldoAlPagar: socio.deuda,
-                estadoAuto: m[socio.socio] >= socio.deuda ? "PAGO" : "PAGO PARCIAL",
+                pago: pagoPrevio + m[socio.socio], saldoAlPagar: socio.deuda,
+                estadoAuto: m[socio.socio] >= neto.deudaNeta ? "PAGO" : "PAGO PARCIAL",
               }));
             }} />
         ) : (
@@ -1321,23 +1363,45 @@ function Panel({ socio, familia, estado, esSecretaria, marcar, comentar, editarL
         ))}
 
         <div className="panel-sec">
-          <h4>Saldo detallado</h4>
+          <h4>Composición del saldo</h4>
+          {estado.pago > 0 && (
+            <p className="t-cap" style={{ margin: "0 0 var(--s3)" }}>
+              Se muestra ya descontado lo cobrado — primero se cancelan los períodos más viejos.
+            </p>
+          )}
           <table className="detalle">
             <tbody>
-              {porPeriodo.map(([per, items]) => (
-                <React.Fragment key={per}>
-                  <tr>
-                    <td className="per">{periodoLabel(per)}</td>
-                    <td className="per imp">{money(items.reduce((a, i) => a + i.deuda, 0))}</td>
-                  </tr>
-                  {items.map((i, k) => (
-                    <tr key={k}>
-                      <td className="apagado" style={{ paddingLeft: "var(--s3)" }}>{i.concepto}</td>
-                      <td className="imp apagado">{money(i.deuda)}</td>
+              {porPeriodo.map(([per, items, np]) => {
+                const bruto = items.reduce((a, i) => a + i.deuda, 0);
+                const netoPeriodo = np ? np.neto : bruto;
+                const pagado = netoPeriodo <= 0.5;
+                return (
+                  <React.Fragment key={per}>
+                    <tr>
+                      <td className="per">
+                        {periodoLabel(per)}
+                        {pagado && <Badge tono="exito" style={{ marginLeft: 8 }}>Cubierto</Badge>}
+                      </td>
+                      <td className="per imp">
+                        {pagado ? (
+                          <span className="apagado" style={{ textDecoration: "line-through" }}>{money(bruto)}</span>
+                        ) : np && np.cubierto > 0 ? (
+                          <>
+                            <span className="apagado" style={{ textDecoration: "line-through", marginRight: 6 }}>{money(bruto)}</span>
+                            {money(netoPeriodo)}
+                          </>
+                        ) : money(bruto)}
+                      </td>
                     </tr>
-                  ))}
-                </React.Fragment>
-              ))}
+                    {items.map((i, k) => (
+                      <tr key={k}>
+                        <td className="apagado" style={{ paddingLeft: "var(--s3)" }}>{i.concepto}</td>
+                        <td className="imp apagado">{money(i.deuda)}</td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1681,10 +1745,20 @@ export default function App() {
       .map((f) => {
         const estados = f.miembros.map((m) => g(m.socio).estado);
         const fechas = f.miembros.map((m) => g(m.socio).ultimoReclamo).filter(Boolean).sort();
-        return { ...f, estados, ultimoReclamo: fechas.length ? fechas[fechas.length - 1] : null };
+        // Cada miembro con su saldo ya neto de lo cobrado, y la familia sumando esos netos.
+        const miembrosNeto = f.miembros.map((m) => ({ ...m, ...calcularNeto(m, g(m.socio).pago) }));
+        const deudaNeta = miembrosNeto.reduce((a, m) => a + m.deudaNeta, 0);
+        const vieja = miembrosNeto.reduce((a, m) => a + m.vieja, 0);
+        const corriente = miembrosNeto.reduce((a, m) => a + m.corriente, 0);
+        const mesesNeto = Math.max(0, ...miembrosNeto.map((m) => m.mesesNeto));
+        return {
+          ...f, estados, miembros: miembrosNeto,
+          deuda: deudaNeta, deudaBruta: f.deuda, vieja, corriente, meses: mesesNeto,
+          ultimoReclamo: fechas.length ? fechas[fechas.length - 1] : null,
+        };
       })
       .filter((f) => {
-        if (f.deuda < 1000) return false;
+        if (f.deuda < 1000) return false; // ya con lo cobrado descontado
         if (f.miembros.some((m) => m.tienePlan)) return false;
         if (f.estados.every((e) => e && ESTADO_MAP[e]?.cierra)) return false;
         const d = diasDesde(f.ultimoReclamo);
@@ -1698,15 +1772,17 @@ export default function App() {
   const listaSocios = useMemo(() => {
     if (!datos) return [];
     const q = busqueda.trim().toLowerCase();
-    return datos.socios.filter((s) => {
-      if (q && !(s.nombre.toLowerCase().includes(q) || String(s.socio).includes(q))) return false;
-      if (actividad && s.actividad !== actividad) return false;
-      if (filtroEstado) {
-        const e = g(s.socio).estado;
-        if (filtroEstado === "__sin" ? e : e !== filtroEstado) return false;
-      }
-      return true;
-    });
+    return datos.socios
+      .filter((s) => {
+        if (q && !(s.nombre.toLowerCase().includes(q) || String(s.socio).includes(q))) return false;
+        if (actividad && s.actividad !== actividad) return false;
+        if (filtroEstado) {
+          const e = g(s.socio).estado;
+          if (filtroEstado === "__sin" ? e : e !== filtroEstado) return false;
+        }
+        return true;
+      })
+      .map((s) => ({ ...s, ...calcularNeto(s, g(s.socio).pago) }));
   }, [datos, busqueda, actividad, filtroEstado, gestion, g]);
 
   const resumen = useMemo(() => {
@@ -1714,7 +1790,8 @@ export default function App() {
     const m = new Map();
     for (const s of datos.socios) {
       if (!m.has(s.actividad)) m.set(s.actividad, { actividad: s.actividad, socios: 0, deuda: 0, cobrado: 0, conteo: {} });
-      const r = m.get(s.actividad); r.socios++; r.deuda += s.deuda;
+      const r = m.get(s.actividad); r.socios++;
+      r.deuda += calcularNeto(s, g(s.socio).pago).deudaNeta;
       const e = g(s.socio).estado || "__sin";
       r.conteo[e] = (r.conteo[e] || 0) + 1;
       r.cobrado += Number(g(s.socio).pago) || 0;
@@ -1725,11 +1802,13 @@ export default function App() {
   const totales = useMemo(() => {
     if (!datos) return null;
     const rel = actividad ? datos.socios.filter((s) => s.actividad === actividad) : datos.socios;
+    const netos = rel.map((s) => calcularNeto(s, g(s.socio).pago));
     return {
-      deuda: rel.reduce((a, s) => a + s.deuda, 0),
+      deuda: netos.reduce((a, n) => a + n.deudaNeta, 0),
+      deudaBruta: rel.reduce((a, s) => a + s.deuda, 0),
       cobrado: rel.reduce((a, s) => a + (Number(g(s.socio).pago) || 0), 0),
       gestionados: rel.filter((s) => g(s.socio).estado).length,
-      atrasados: rel.filter((s) => s.meses > MESES_ALERTA).length,
+      atrasados: netos.filter((n) => n.mesesNeto > MESES_ALERTA).length,
       socios: rel.length,
       familias: datos.familias.length,
     };
@@ -1790,7 +1869,7 @@ export default function App() {
             <span className="titulo">Saldos de cuentas corrientes</span>
           </div>
 
-          <Buscador socios={datos.socios} abrir={setAbierto} />
+          <Buscador socios={datos.socios} g={g} abrir={setAbierto} />
 
           <div style={{ marginLeft: "auto", display: "flex", gap: "var(--s2)", alignItems: "center" }}>
             <Menu etiqueta="Cambiar de rol" disparador={(toggle, ab) => (
